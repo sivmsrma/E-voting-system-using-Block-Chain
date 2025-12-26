@@ -1,0 +1,899 @@
+import React, { useState, useEffect } from "react";
+import { View, Text, TouchableOpacity, TextInput, ScrollView, StyleSheet, ActivityIndicator } from "react-native";
+
+export default function AdminDashboard({ contract, showNotification }) {
+    const [candidates, setCandidates] = useState([]);
+    const [newCandidateName, setNewCandidateName] = useState("");
+    const [electionName, setElectionName] = useState("");
+    const [currentElectionName, setCurrentElectionName] = useState("");
+    const [duration, setDuration] = useState("60");
+    const [loading, setLoading] = useState(false);
+    const [electionStatus, setElectionStatus] = useState({ started: false, ended: false, endTime: 0 });
+    const [timeRemaining, setTimeRemaining] = useState(0);
+    const [electionCreated, setElectionCreated] = useState(false);
+    const [electionHistory, setElectionHistory] = useState([]);
+    const [showHistory, setShowHistory] = useState(false);
+    const [electionCount, setElectionCount] = useState(0);
+
+    useEffect(() => {
+        if (contract) {
+            fetchData();
+        }
+    }, [contract]);
+
+    useEffect(() => {
+        if (electionStatus.started && !electionStatus.ended && electionStatus.endTime > 0) {
+            const timer = setInterval(() => {
+                const now = Math.floor(Date.now() / 1000);
+                const remaining = electionStatus.endTime - now;
+                setTimeRemaining(remaining > 0 ? remaining : 0);
+
+                if (remaining <= 0 && contract) {
+                    fetchData();
+                }
+            }, 1000);
+
+            return () => clearInterval(timer);
+        }
+    }, [electionStatus, contract]);
+
+    const fetchData = async () => {
+        try {
+            const count = await contract.electionCount();
+            setElectionCount(Number(count));
+
+            if (Number(count) > 0) {
+                const currentElection = await contract.getCurrentElection();
+                setCurrentElectionName(currentElection.name);
+                setElectionCreated(true);
+                setElectionStatus({
+                    started: currentElection.started,
+                    ended: currentElection.ended,
+                    endTime: Number(currentElection.endTime)
+                });
+
+                const candidatesList = await contract.getAllCandidates();
+                const formattedCandidates = candidatesList.map((c) => ({
+                    id: Number(c.id),
+                    name: c.name,
+                    voteCount: Number(c.voteCount),
+                }));
+                setCandidates(formattedCandidates);
+            } else {
+                setElectionCreated(false);
+                setCandidates([]);
+            }
+
+            // Fetch election history
+            if (Number(count) > 0) {
+                const allElections = await contract.getAllElections();
+                setElectionHistory(allElections.map(e => ({
+                    id: Number(e.id),
+                    name: e.name,
+                    started: e.started,
+                    ended: e.ended,
+                    totalVotes: Number(e.totalVotes),
+                    startTime: Number(e.startTime),
+                    endTime: Number(e.endTime)
+                })));
+            }
+        } catch (err) {
+            console.error("Error fetching data", err);
+        }
+    };
+
+    const createElection = async () => {
+        if (!contract) return;
+        if (!electionName.trim()) {
+            showNotification("Please enter election name", "error");
+            return;
+        }
+        try {
+            setLoading(true);
+            const tx = await contract.createElection(electionName);
+            await tx.wait();
+            showNotification("Election created successfully!", "success");
+            setElectionCreated(true);
+            setCurrentElectionName(electionName);
+            setElectionName("");
+            fetchData();
+        } catch (err) {
+            console.error(err);
+            showNotification(err.reason || "Error creating election", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const addCandidate = async () => {
+        if (!contract || !newCandidateName.trim()) {
+            showNotification("Please enter a candidate name", "error");
+            return;
+        }
+        try {
+            setLoading(true);
+            const tx = await contract.addCandidate(newCandidateName);
+            await tx.wait();
+            setNewCandidateName("");
+            showNotification("Candidate added successfully!", "success");
+            fetchData();
+        } catch (err) {
+            console.error(err);
+            showNotification(err.reason || "Error adding candidate", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const startElection = async () => {
+        if (!contract) return;
+        if (candidates.length < 2) {
+            showNotification("Add at least 2 candidates to start election", "error");
+            return;
+        }
+        try {
+            setLoading(true);
+            const tx = await contract.startElection(duration);
+            await tx.wait();
+            showNotification("Election started!", "success");
+            fetchData();
+        } catch (err) {
+            console.error(err);
+            showNotification(err.reason || "Error starting election", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const endElection = async () => {
+        if (!contract) return;
+        try {
+            setLoading(true);
+            const tx = await contract.endElection();
+            await tx.wait();
+            showNotification("Election ended!", "success");
+            fetchData();
+        } catch (err) {
+            console.error(err);
+            showNotification(err.reason || "Error ending election", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const formatTime = (seconds) => {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const formatDate = (timestamp) => {
+        if (timestamp === 0) return "Not started";
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleString();
+    };
+
+    const getTotalVotes = () => candidates.reduce((sum, c) => sum + c.voteCount, 0);
+    const isElectionEnded = () => electionStatus.started && (electionStatus.ended || timeRemaining === 0);
+    const canCreateNewElection = () => !electionCreated || isElectionEnded();
+
+    return (
+        <ScrollView style={styles.container}>
+            {/* Election Status Card */}
+            <View style={styles.statusCard}>
+                <View style={styles.statusHeader}>
+                    <Text style={styles.statusTitle}>Current Election</Text>
+                    {currentElectionName && (
+                        <Text style={styles.electionNameBadge}>📋 {currentElectionName}</Text>
+                    )}
+                </View>
+                <View style={styles.statusRow}>
+                    <View style={styles.statusItem}>
+                        <Text style={styles.statusLabel}>Status</Text>
+                        <View style={styles.statusBadge}>
+                            <View style={[styles.statusDot, {
+                                backgroundColor: electionStatus.started ? (isElectionEnded() ? '#ef4444' : '#10b981') : '#888'
+                            }]} />
+                            <Text style={styles.statusValue}>
+                                {electionStatus.started ? (isElectionEnded() ? 'Ended' : 'Active') : (electionCreated ? 'Created' : 'Not Created')}
+                            </Text>
+                        </View>
+                    </View>
+                    <View style={styles.statusItem}>
+                        <Text style={styles.statusLabel}>Total Candidates</Text>
+                        <Text style={styles.statusValue}>{candidates.length}</Text>
+                    </View>
+                    <View style={styles.statusItem}>
+                        <Text style={styles.statusLabel}>Total Votes</Text>
+                        <Text style={styles.statusValue}>{getTotalVotes()}</Text>
+                    </View>
+                    {electionStatus.started && !isElectionEnded() && (
+                        <View style={styles.statusItem}>
+                            <Text style={styles.statusLabel}>Time Remaining</Text>
+                            <Text style={styles.statusValue}>{formatTime(timeRemaining)}</Text>
+                        </View>
+                    )}
+                </View>
+
+                {/* History Button */}
+                <TouchableOpacity
+                    style={styles.historyButton}
+                    onPress={() => setShowHistory(!showHistory)}
+                >
+                    <Text style={styles.historyButtonText}>
+                        {showHistory ? '📊 Hide History' : `📜 View History (${electionCount} elections)`}
+                    </Text>
+                </TouchableOpacity>
+            </View>
+
+            {/* Election History */}
+            {showHistory && (
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>📜 Election History</Text>
+                    {electionHistory.length === 0 ? (
+                        <View style={styles.emptyState}>
+                            <Text style={styles.emptyIcon}>📭</Text>
+                            <Text style={styles.emptyText}>No past elections</Text>
+                        </View>
+                    ) : (
+                        <View style={styles.historyList}>
+                            {electionHistory.slice().reverse().map((election, index) => (
+                                <ElectionHistoryItem
+                                    key={election.id}
+                                    election={election}
+                                    contract={contract}
+                                    formatDate={formatDate}
+                                />
+                            ))}
+                        </View>
+                    )}
+                </View>
+            )}
+
+            {/* Winning Prediction (during active election) */}
+            {electionStatus.started && !isElectionEnded() && getTotalVotes() > 0 && (
+                <View style={styles.predictionCard}>
+                    <Text style={styles.predictionTitle}>📈 Live Prediction</Text>
+                    <View style={styles.predictionContent}>
+                        <Text style={styles.predictionLabel}>Currently Leading:</Text>
+                        <Text style={styles.predictionName}>
+                            {[...candidates].sort((a, b) => b.voteCount - a.voteCount)[0]?.name}
+                        </Text>
+                        <Text style={styles.predictionVotes}>
+                            {[...candidates].sort((a, b) => b.voteCount - a.voteCount)[0]?.voteCount} votes
+                            ({getTotalVotes() > 0 ? (([...candidates].sort((a, b) => b.voteCount - a.voteCount)[0]?.voteCount / getTotalVotes()) * 100).toFixed(1) : 0}%)
+                        </Text>
+                    </View>
+                </View>
+            )}
+
+            {/* Create New Election */}
+            {canCreateNewElection() && (
+                <View style={styles.section}>
+                    <View style={styles.stepHeader}>
+                        <Text style={styles.stepNumber}>1</Text>
+                        <Text style={styles.sectionTitle}>Create New Election</Text>
+                    </View>
+                    <View style={styles.inputGroup}>
+                        <Text style={styles.inputLabel}>Election Name</Text>
+                        <TextInput
+                            style={styles.input}
+                            placeholder="Enter election name (e.g., Student Council 2024)"
+                            placeholderTextColor="#666"
+                            value={electionName}
+                            onChangeText={setElectionName}
+                            editable={!loading}
+                        />
+                        <TouchableOpacity
+                            style={[styles.createButton, loading && styles.disabledButton]}
+                            onPress={createElection}
+                            disabled={loading}
+                        >
+                            {loading ? (
+                                <ActivityIndicator size="small" color="#fff" />
+                            ) : (
+                                <Text style={styles.buttonText}>Create Election</Text>
+                            )}
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            )}
+
+            {/* Add Candidates */}
+            {electionCreated && !electionStatus.started && (
+                <View style={styles.section}>
+                    <View style={styles.stepHeader}>
+                        <Text style={styles.stepNumber}>2</Text>
+                        <Text style={styles.sectionTitle}>Add Candidates</Text>
+                    </View>
+                    <View style={styles.inputGroup}>
+                        <TextInput
+                            style={styles.input}
+                            placeholder="Enter candidate name"
+                            placeholderTextColor="#666"
+                            value={newCandidateName}
+                            onChangeText={setNewCandidateName}
+                            editable={!loading}
+                        />
+                        <TouchableOpacity
+                            style={[styles.addButton, loading && styles.disabledButton]}
+                            onPress={addCandidate}
+                            disabled={loading}
+                        >
+                            {loading ? (
+                                <ActivityIndicator size="small" color="#fff" />
+                            ) : (
+                                <Text style={styles.buttonText}>Add Candidate</Text>
+                            )}
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            )}
+
+            {/* Candidates List */}
+            {electionCreated && (
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>📋 Candidates List</Text>
+                    {candidates.length === 0 ? (
+                        <View style={styles.emptyState}>
+                            <Text style={styles.emptyIcon}>📭</Text>
+                            <Text style={styles.emptyText}>No candidates added yet</Text>
+                            {!electionStatus.started && <Text style={styles.emptySubtext}>Add at least 2 candidates to start</Text>}
+                        </View>
+                    ) : (
+                        <View style={styles.candidatesList}>
+                            {candidates.map((candidate, index) => (
+                                <View key={candidate.id} style={styles.candidateItem}>
+                                    <View style={styles.candidateNumber}>
+                                        <Text style={styles.candidateNumberText}>{index + 1}</Text>
+                                    </View>
+                                    <View style={styles.candidateInfo}>
+                                        <Text style={styles.candidateName}>{candidate.name}</Text>
+                                        <Text style={styles.candidateVotes}>{candidate.voteCount} votes</Text>
+                                    </View>
+                                </View>
+                            ))}
+                        </View>
+                    )}
+                </View>
+            )}
+
+            {/* Start Election */}
+            {electionCreated && !electionStatus.started && candidates.length >= 2 && (
+                <View style={styles.section}>
+                    <View style={styles.stepHeader}>
+                        <Text style={styles.stepNumber}>3</Text>
+                        <Text style={styles.sectionTitle}>Start Election</Text>
+                    </View>
+                    <View style={styles.inputGroup}>
+                        <View style={styles.durationInput}>
+                            <Text style={styles.inputLabel}>Duration (minutes)</Text>
+                            <TextInput
+                                style={styles.input}
+                                placeholder="60"
+                                placeholderTextColor="#666"
+                                value={duration}
+                                onChangeText={setDuration}
+                                keyboardType="numeric"
+                                editable={!loading}
+                            />
+                        </View>
+                        <TouchableOpacity
+                            style={[styles.startButton, loading && styles.disabledButton]}
+                            onPress={startElection}
+                            disabled={loading}
+                        >
+                            {loading ? (
+                                <ActivityIndicator size="small" color="#fff" />
+                            ) : (
+                                <Text style={styles.buttonText}>Start Election</Text>
+                            )}
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            )}
+
+            {/* End Election Button */}
+            {electionStatus.started && !isElectionEnded() && (
+                <View style={styles.section}>
+                    <TouchableOpacity
+                        style={[styles.endButton, loading && styles.disabledButton]}
+                        onPress={endElection}
+                        disabled={loading}
+                    >
+                        {loading ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                        ) : (
+                            <Text style={styles.buttonText}>⏹️ End Election Manually</Text>
+                        )}
+                    </TouchableOpacity>
+                </View>
+            )}
+
+            {/* Final Results */}
+            {isElectionEnded() && (
+                <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>🏆 Final Results</Text>
+                    <View style={styles.resultsList}>
+                        {[...candidates]
+                            .sort((a, b) => b.voteCount - a.voteCount)
+                            .map((candidate, index) => (
+                                <View key={candidate.id} style={[
+                                    styles.resultItem,
+                                    index === 0 && styles.winnerItem
+                                ]}>
+                                    <View style={styles.resultRank}>
+                                        <Text style={styles.resultRankText}>
+                                            {index === 0 ? '🏆' : `#${index + 1}`}
+                                        </Text>
+                                    </View>
+                                    <View style={styles.resultInfo}>
+                                        <Text style={styles.resultName}>{candidate.name}</Text>
+                                        <Text style={styles.resultVotes}>
+                                            {candidate.voteCount} votes ({getTotalVotes() > 0 ? ((candidate.voteCount / getTotalVotes()) * 100).toFixed(1) : 0}%)
+                                        </Text>
+                                    </View>
+                                </View>
+                            ))}
+                    </View>
+                </View>
+            )}
+        </ScrollView>
+    );
+}
+
+// Election History Item Component
+function ElectionHistoryItem({ election, contract, formatDate }) {
+    const [candidates, setCandidates] = useState([]);
+    const [expanded, setExpanded] = useState(false);
+    const [loading, setLoading] = useState(false);
+
+    const loadCandidates = async () => {
+        if (expanded) {
+            setExpanded(false);
+            return;
+        }
+
+        try {
+            setLoading(true);
+            const candidatesList = await contract.getElectionCandidates(election.id);
+            const formatted = candidatesList.map(c => ({
+                id: Number(c.id),
+                name: c.name,
+                voteCount: Number(c.voteCount)
+            }));
+            setCandidates(formatted);
+            setExpanded(true);
+        } catch (err) {
+            console.error("Error loading candidates", err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const winner = candidates.length > 0 ? [...candidates].sort((a, b) => b.voteCount - a.voteCount)[0] : null;
+
+    return (
+        <View style={styles.historyItem}>
+            <TouchableOpacity onPress={loadCandidates} style={styles.historyHeader}>
+                <View style={styles.historyHeaderLeft}>
+                    <Text style={styles.historyElectionName}>{election.name}</Text>
+                    <Text style={styles.historyDate}>{formatDate(election.startTime)}</Text>
+                </View>
+                <View style={styles.historyHeaderRight}>
+                    <Text style={styles.historyVotes}>{election.totalVotes} votes</Text>
+                    <Text style={styles.expandIcon}>{expanded ? '▼' : '▶'}</Text>
+                </View>
+            </TouchableOpacity>
+
+            {loading && <ActivityIndicator size="small" color="#6366f1" style={{ marginTop: 10 }} />}
+
+            {expanded && !loading && (
+                <View style={styles.historyResults}>
+                    {winner && (
+                        <View style={styles.historyWinner}>
+                            <Text style={styles.historyWinnerLabel}>🏆 Winner:</Text>
+                            <Text style={styles.historyWinnerName}>{winner.name}</Text>
+                            <Text style={styles.historyWinnerVotes}>{winner.voteCount} votes</Text>
+                        </View>
+                    )}
+                    <View style={styles.historyCandidates}>
+                        {candidates.map((c, idx) => (
+                            <View key={c.id} style={styles.historyCandidateItem}>
+                                <Text style={styles.historyCandidateRank}>#{idx + 1}</Text>
+                                <Text style={styles.historyCandidateName}>{c.name}</Text>
+                                <Text style={styles.historyCandidateVotes}>{c.voteCount} votes</Text>
+                            </View>
+                        ))}
+                    </View>
+                </View>
+            )}
+        </View>
+    );
+}
+
+const styles = StyleSheet.create({
+    container: {
+        flex: 1,
+        padding: 20,
+    },
+    statusCard: {
+        backgroundColor: "#1a1a2e",
+        padding: 24,
+        borderRadius: 16,
+        marginBottom: 20,
+        borderWidth: 1,
+        borderColor: "#2d2d44",
+    },
+    historyButton: {
+        marginTop: 16,
+        backgroundColor: "#6366f1",
+        paddingVertical: 12,
+        paddingHorizontal: 20,
+        borderRadius: 8,
+        alignItems: "center",
+    },
+    historyButtonText: {
+        color: "#fff",
+        fontWeight: "600",
+        fontSize: 14,
+    },
+    historyList: {
+        gap: 12,
+    },
+    historyItem: {
+        backgroundColor: "#0f0f23",
+        padding: 16,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: "#2d2d44",
+    },
+    historyHeader: {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+    },
+    historyHeaderLeft: {
+        flex: 1,
+    },
+    historyHeaderRight: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+    },
+    historyElectionName: {
+        fontSize: 16,
+        fontWeight: "600",
+        color: "#fff",
+        marginBottom: 4,
+    },
+    historyDate: {
+        fontSize: 12,
+        color: "#888",
+    },
+    historyVotes: {
+        fontSize: 14,
+        color: "#6366f1",
+        fontWeight: "600",
+    },
+    expandIcon: {
+        fontSize: 12,
+        color: "#888",
+    },
+    historyResults: {
+        marginTop: 16,
+        paddingTop: 16,
+        borderTopWidth: 1,
+        borderTopColor: "#2d2d44",
+    },
+    historyWinner: {
+        backgroundColor: "rgba(251, 191, 36, 0.1)",
+        padding: 12,
+        borderRadius: 8,
+        marginBottom: 12,
+        alignItems: "center",
+    },
+    historyWinnerLabel: {
+        fontSize: 14,
+        color: "#fbbf24",
+        marginBottom: 4,
+    },
+    historyWinnerName: {
+        fontSize: 18,
+        fontWeight: "bold",
+        color: "#fff",
+        marginBottom: 4,
+    },
+    historyWinnerVotes: {
+        fontSize: 14,
+        color: "#888",
+    },
+    historyCandidates: {
+        gap: 8,
+    },
+    historyCandidateItem: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+        padding: 8,
+    },
+    historyCandidateRank: {
+        fontSize: 14,
+        color: "#888",
+        width: 30,
+    },
+    historyCandidateName: {
+        flex: 1,
+        fontSize: 14,
+        color: "#fff",
+    },
+    historyCandidateVotes: {
+        fontSize: 14,
+        color: "#6366f1",
+    },
+    predictionCard: {
+        backgroundColor: "#1a1a2e",
+        padding: 24,
+        borderRadius: 16,
+        marginBottom: 20,
+        borderWidth: 2,
+        borderColor: "#10b981",
+    },
+    predictionTitle: {
+        fontSize: 18,
+        fontWeight: "600",
+        color: "#10b981",
+        marginBottom: 16,
+    },
+    predictionContent: {
+        alignItems: "center",
+    },
+    predictionLabel: {
+        fontSize: 14,
+        color: "#888",
+        marginBottom: 8,
+    },
+    predictionName: {
+        fontSize: 24,
+        fontWeight: "bold",
+        color: "#fff",
+        marginBottom: 8,
+    },
+    predictionVotes: {
+        fontSize: 16,
+        color: "#10b981",
+    },
+    statusTitle: {
+        fontSize: 20,
+        fontWeight: "600",
+        color: "#fff",
+    },
+    statusHeader: {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: 16,
+    },
+    electionNameBadge: {
+        fontSize: 14,
+        fontWeight: "600",
+        color: "#6366f1",
+        backgroundColor: "rgba(99, 102, 241, 0.1)",
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: 8,
+    },
+    statusRow: {
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 20,
+    },
+    statusItem: {
+        flex: 1,
+        minWidth: 120,
+    },
+    statusLabel: {
+        fontSize: 12,
+        color: "#888",
+        marginBottom: 8,
+    },
+    statusBadge: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+    },
+    statusValue: {
+        fontSize: 18,
+        fontWeight: "600",
+        color: "#fff",
+    },
+    section: {
+        backgroundColor: "#1a1a2e",
+        padding: 20,
+        borderRadius: 16,
+        marginBottom: 20,
+        borderWidth: 1,
+        borderColor: "#2d2d44",
+    },
+    stepHeader: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+        marginBottom: 16,
+    },
+    stepNumber: {
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        backgroundColor: "#6366f1",
+        color: "#fff",
+        fontSize: 18,
+        fontWeight: "bold",
+        textAlign: "center",
+        lineHeight: 32,
+    },
+    sectionTitle: {
+        fontSize: 18,
+        fontWeight: "600",
+        color: "#fff",
+    },
+    inputGroup: {
+        gap: 12,
+    },
+    durationInput: {
+        marginBottom: 12,
+    },
+    inputLabel: {
+        fontSize: 14,
+        color: "#888",
+        marginBottom: 8,
+    },
+    input: {
+        backgroundColor: "#0f0f23",
+        color: "#fff",
+        padding: 14,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: "#2d2d44",
+        fontSize: 16,
+        outlineWidth: 0,
+    },
+    createButton: {
+        backgroundColor: "#6366f1",
+        paddingVertical: 14,
+        paddingHorizontal: 24,
+        borderRadius: 8,
+        alignItems: "center",
+    },
+    addButton: {
+        backgroundColor: "#8b5cf6",
+        paddingVertical: 14,
+        paddingHorizontal: 24,
+        borderRadius: 8,
+        alignItems: "center",
+    },
+    startButton: {
+        backgroundColor: "#10b981",
+        paddingVertical: 14,
+        paddingHorizontal: 24,
+        borderRadius: 8,
+        alignItems: "center",
+    },
+    endButton: {
+        backgroundColor: "#ef4444",
+        paddingVertical: 14,
+        paddingHorizontal: 24,
+        borderRadius: 8,
+        alignItems: "center",
+    },
+    disabledButton: {
+        backgroundColor: "#2d2d44",
+        opacity: 0.5,
+    },
+    buttonText: {
+        color: "#fff",
+        fontWeight: "600",
+        fontSize: 16,
+    },
+    candidatesList: {
+        gap: 12,
+    },
+    candidateItem: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 16,
+        backgroundColor: "#0f0f23",
+        padding: 16,
+        borderRadius: 8,
+    },
+    candidateNumber: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: "#6366f1",
+        justifyContent: "center",
+        alignItems: "center",
+    },
+    candidateNumberText: {
+        color: "#fff",
+        fontWeight: "600",
+        fontSize: 16,
+    },
+    candidateInfo: {
+        flex: 1,
+    },
+    candidateName: {
+        fontSize: 16,
+        fontWeight: "600",
+        color: "#fff",
+        marginBottom: 4,
+    },
+    candidateVotes: {
+        fontSize: 14,
+        color: "#888",
+    },
+    emptyState: {
+        alignItems: "center",
+        paddingVertical: 40,
+    },
+    emptyIcon: {
+        fontSize: 48,
+        marginBottom: 12,
+    },
+    emptyText: {
+        color: "#888",
+        fontSize: 16,
+        marginBottom: 4,
+    },
+    emptySubtext: {
+        color: "#666",
+        fontSize: 14,
+    },
+    resultsList: {
+        gap: 12,
+    },
+    resultItem: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 16,
+        backgroundColor: "#0f0f23",
+        padding: 16,
+        borderRadius: 8,
+    },
+    winnerItem: {
+        borderWidth: 2,
+        borderColor: "#fbbf24",
+        backgroundColor: "rgba(251, 191, 36, 0.1)",
+    },
+    resultRank: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: "#2d2d44",
+        justifyContent: "center",
+        alignItems: "center",
+    },
+    resultRankText: {
+        fontSize: 18,
+        fontWeight: "600",
+    },
+    resultInfo: {
+        flex: 1,
+    },
+    resultName: {
+        fontSize: 16,
+        fontWeight: "600",
+        color: "#fff",
+        marginBottom: 4,
+    },
+    resultVotes: {
+        fontSize: 14,
+        color: "#888",
+    },
+});
